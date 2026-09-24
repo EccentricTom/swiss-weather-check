@@ -5,7 +5,9 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from io import BytesIO, StringIO
 
+from openpyxl import load_workbook
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
@@ -28,15 +30,25 @@ ITEMS_URL = (
     "collections/ch.meteoschweiz.ogd-local-forecasting/items"
 )
 
+PICTOGRAMS_URL = (
+    "https://www.meteoswiss.admin.ch/dam/"
+    "jcr:bfcea855-ab6b-4602-9d8b-0464afa30e66/"
+    "2022-02-14-Wetter-Icons-inkl-beschreibung-v1-an-website.xlsx"
+)
+
 
 @dataclass
 class WeatherSearchState:
     request_id: int
     region: str
     point_id: str | None = None
+    point_type_id: str | None = None
     temperature_data: str | None = None
     weather_type_data: str | None = None
+    temperature: str | None = None
     weather_code: str | None = None
+    weather_description: str | None = None
+    weather_emoji: str | None = None
 
 
 class WeatherApp(QWidget):
@@ -51,17 +63,20 @@ class WeatherApp(QWidget):
         # Empty data points, will be replaced by manager
         self.request_id: int = 0
         self.search_state: WeatherSearchState | None = None
+        self.weather_descriptions: dict[int, str] = {}
         # Widgets
         self.region_label = QLabel("Enter region name: ")
         self.region_input = QLineEdit()
         self.get_weather_button = QPushButton("Get Weather")
-        self.temperature_label = QLabel("18ºC")
-        self.temp_emoji_label = QLabel("☀️")
-        self.temp_description_label = QLabel("sunny")
+        self.temperature_label = QLabel("--°C")
+        self.temp_emoji_label = QLabel("")
+        self.temp_description_label = QLabel("")
         # Network manager to handle network requests asynchronously
         self.network_manager = QNetworkAccessManager(self)
 
         self.init_ui()
+
+        self.fetch_url(PICTOGRAMS_URL, self.handle_pictogram_data)
 
     def init_ui(self):
         """Initialise the UI"""
@@ -131,6 +146,13 @@ class WeatherApp(QWidget):
         self.request_id += 1
 
         region = self.region_input.text().strip()
+
+        if not region:
+            self.display_error("Please input a region")
+            return
+
+        self.get_weather_button.setEnabled(False)
+        self.get_weather_button.setText("Loading...")
 
         self.search_state = WeatherSearchState(
             request_id=self.request_id,
@@ -226,6 +248,30 @@ class WeatherApp(QWidget):
         )
 
     @staticmethod
+    def get_weather_emoji(description: str) -> str:
+        description = description.casefold()
+
+        if "thunder" in description:
+            return "⛈️"
+
+        if "snow" in description:
+            return "🌨️"
+
+        if "rain" in description or "shower" in description:
+            return "🌧️"
+
+        if "fog" in description or "mist" in description:
+            return "🌫️"
+
+        if "cloud" in description:
+            return "⛅"
+
+        if "sunny" in description or "sun" in description:
+            return "☀️"
+
+        return "🌤️"
+
+    @staticmethod
     def find_latest_asset_url(
         features: list[dict],
         parameter: str,
@@ -259,13 +305,14 @@ class WeatherApp(QWidget):
 
         text = data.decode("latin-1")
 
-        reader = csv.DictReader(io.StringIO(text), delimiter=";")
+        reader = csv.DictReader(StringIO(text), delimiter=";")
 
         target = region.casefold()
 
         for row in reader:
             if row["point_name"].casefold() == target:
                 self.search_state.point_id = row["point_id"]
+                self.search_state.point_type_id = row["point_type_id"]
                 self.try_update_weather()
                 return
 
@@ -291,9 +338,28 @@ class WeatherApp(QWidget):
         self.search_state.weather_type_data = data.decode("latin-1")
         self.try_update_weather()
 
+    def handle_pictogram_data(self, data: bytes) -> None:
+        workbook = load_workbook(
+            BytesIO(data),
+            read_only=True,
+            data_only=True,
+        )
+
+        worksheet = workbook["aktuellste Version"]
+
+        for row in worksheet.iter_rows(values_only=True):
+            code = row[1]
+            description_en = row[5]
+
+            if isinstance(code, int) and description_en:
+                self.weather_descriptions[code] = str(description_en)
+
+        workbook.close()
+
     def try_update_weather(self) -> None:
         self.try_update_temperature()
         self.try_update_weather_type()
+        self.display_weather()
 
     def try_update_weather_type(self) -> None:
         if self.search_state.point_id is None:
@@ -304,19 +370,26 @@ class WeatherApp(QWidget):
         current_hour = datetime.now(UTC).strftime("%Y%m%d%H00")
 
         reader = csv.DictReader(
-            io.StringIO(self.search_state.weather_type_data),
+            StringIO(self.search_state.weather_type_data),
             delimiter=";",
         )
 
         for row in reader:
             if (
                 row["point_id"] == self.search_state.point_id
+                and row["point_type_id"] == self.search_state.point_type_id
                 and row["Date"] == current_hour
             ):
-                self.weather_code = row["jww003i0"]
-
-                print("Current weather code:", self.weather_code)
-                break
+                weather_code = int(row["jww003i0"])
+                self.search_state.weather_code = str(weather_code)
+                self.search_state.weather_description = self.weather_descriptions.get(
+                    weather_code,
+                    f"Unknown weather code ({weather_code})",
+                )
+                self.search_state.weather_emoji = self.get_weather_emoji(
+                    self.search_state.weather_description
+                )
+                return
 
     def try_update_temperature(self) -> None:
         if self.search_state.point_id is None:
@@ -330,20 +403,45 @@ class WeatherApp(QWidget):
         )
 
         for row in reader:
-            if row["point_id"] == self.search_state.point_id:
-                temperature = row["tre200h0"]
-
-                self.temperature_label.setText(f"{temperature}°C")
-                break
+            if (
+                row["point_id"] == self.search_state.point_id
+                and row["point_type_id"] == self.search_state.point_type_id
+            ):
+                self.search_state.temperature = row["tre200h0"]
+                return
 
     def display_error(
         self,
         message,
     ) -> None:
-        print(message)
+        self.temperature_label.setText("--°C")
+        self.temp_emoji_label.setText("")
+        self.temp_description_label.setText(message)
 
-    def display_weather(self, data):
-        pass
+        self.get_weather_button.setEnabled(True)
+        self.get_weather_button.setText("Get Weather")
+
+    def display_weather(self):
+        if self.search_state is None:
+            return
+
+        if self.search_state.temperature is None:
+            return
+
+        if self.search_state.weather_description is None:
+            return
+
+        if self.search_state.weather_emoji is None:
+            return
+
+        self.temperature_label.setText(f"{self.search_state.temperature}°C")
+
+        self.temp_description_label.setText(self.search_state.weather_description)
+
+        self.temp_emoji_label.setText(self.search_state.weather_emoji)
+
+        self.get_weather_button.setEnabled(True)
+        self.get_weather_button.setText("Get Weather")
 
 
 if __name__ == "__main__":
