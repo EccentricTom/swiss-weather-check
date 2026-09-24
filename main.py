@@ -92,10 +92,13 @@ class WeatherSearchState:
     point_type_id: str | None = None
     temperature_data: str | None = None
     weather_type_data: str | None = None
+    precipitation_probability_data: str | None = None
+
     temperature: float | None = None
     weather_code: int | None = None
     weather_description: str | None = None
     weather_emoji: str | None = None
+    precipitation_probablity: int | None = None
 
 
 class WeatherApp(QWidget):
@@ -327,6 +330,16 @@ class WeatherApp(QWidget):
             "jww003i0",
         )
 
+        precipitation_probability_url = self.find_latest_asset_url(
+            features,
+            "rp0003i0",
+        )
+
+        if precipitation_probability_url is None:
+            self.display_error(
+                "No precipitation probability data available.", request_id
+            )
+
         if temperature_url is None:
             self.display_error("No temperature data available.", request_id)
             return
@@ -347,6 +360,15 @@ class WeatherApp(QWidget):
         self.fetch_url(
             weather_type_url,
             lambda data: self.handle_weather_type_data(
+                data,
+                request_id,
+            ),
+            request_id,
+        )
+
+        self.fetch_url(
+            precipitation_probability_url,
+            lambda data: self.handle_precipitation_probability_data(
                 data,
                 request_id,
             ),
@@ -379,7 +401,7 @@ class WeatherApp(QWidget):
 
     @staticmethod
     def find_latest_asset_url(
-        features: list[dict],
+        features: list[dict[str, str]],
         parameter: str,
     ) -> str | None:
         matching_assets = []
@@ -465,6 +487,17 @@ class WeatherApp(QWidget):
 
         workbook.close()
 
+    def handle_precipitation_probability_data(
+        self,
+        data: bytes,
+        request_id: int,
+    ) -> None:
+        if not self.is_active_request(request_id):
+            return
+
+        self.search_state.precipitation_probability_data = data.decode("latin-1")
+        self.try_update_weather()
+
     def try_update_weather(self) -> None:
         self.try_update_temperature()
         self.try_update_weather_type()
@@ -547,7 +580,7 @@ class WeatherApp(QWidget):
         if self.search_state.weather_emoji is None:
             return
 
-        self.temperature_label.setText(f"{self.search_state.temperature:1f}°C")
+        self.temperature_label.setText(f"{self.search_state.temperature:.1f}°C")
 
         self.temp_description_label.setText(self.search_state.weather_description)
 
