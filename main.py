@@ -244,6 +244,7 @@ class WeatherApp(QWidget):
         self.temperature_label.setText("--°C")
         self.temp_emoji_label.setText("")
         self.temp_description_label.setText("")
+        self.precipitation_label.setText("")
 
         self.get_weather_button.setEnabled(False)
         self.get_weather_button.setText("Loading...")
@@ -597,6 +598,7 @@ class WeatherApp(QWidget):
         self.temperature_label.setText("--°C")
         self.temp_emoji_label.setText("")
         self.temp_description_label.setText(message)
+        self.precipitation_label.setText("")
 
         self.reset_button_state()
 
