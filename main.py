@@ -2,16 +2,19 @@ import csv
 import io
 import json
 import sys
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from io import BytesIO, StringIO
 
 from openpyxl import load_workbook
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import QModelIndex, QPersistentModelIndex, Qt, QUrl
+from PySide6.QtGui import QStandardItem, QStandardItemModel
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QApplication,
+    QCompleter,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -35,6 +38,50 @@ PICTOGRAMS_URL = (
     "jcr:bfcea855-ab6b-4602-9d8b-0464afa30e66/"
     "2022-02-14-Wetter-Icons-inkl-beschreibung-v1-an-website.xlsx"
 )
+
+
+def normalize_place_name(name: str) -> str:
+    name = (
+        name.replace("ä", "ae")
+        .replace("ö", "oe")
+        .replace("ü", "ue")
+        .replace("Ä", "Ae")
+        .replace("Ö", "Oe")
+        .replace("Ü", "Ue")
+    )
+
+    normalized = unicodedata.normalize("NFKD", name)
+
+    return "".join(
+        character for character in normalized if not unicodedata.combining(character)
+    ).casefold()
+
+
+def place_name_aliases(name: str) -> set[str]:
+    stripped = unicodedata.normalize("NFKD", name)
+    stripped = "".join(
+        character for character in stripped if not unicodedata.combining(character)
+    ).casefold()
+
+    transliterated = (
+        name.replace("ä", "ae")
+        .replace("ö", "oe")
+        .replace("ü", "ue")
+        .replace("Ä", "Ae")
+        .replace("Ö", "Oe")
+        .replace("Ü", "Ue")
+        .casefold()
+    )
+
+    return {stripped, transliterated}
+
+
+class NoramlizedCompleter(QCompleter):
+    def splitPath(self, path: str) -> list[str]:
+        return [normalize_place_name(path)]
+
+    def pathFromIndex(self, index: QModelIndex | QPersistentModelIndex) -> str:
+        return index.data(Qt.ItemDataRole.DisplayRole)
 
 
 @dataclass
@@ -64,6 +111,7 @@ class WeatherApp(QWidget):
         self.request_id: int = 0
         self.search_state: WeatherSearchState | None = None
         self.weather_descriptions: dict[int, str] = {}
+        self.point_metadata: list[dict[str, str]] | None = None
         # Widgets
         self.region_label = QLabel("Enter region name: ")
         self.region_input = QLineEdit()
@@ -76,7 +124,13 @@ class WeatherApp(QWidget):
 
         self.init_ui()
 
-        self.fetch_url(PICTOGRAMS_URL, self.handle_pictogram_data)
+        self.fetch_point_metadata()
+
+        self.fetch_url(
+            PICTOGRAMS_URL,
+            self.handle_pictogram_data,
+            request_id=self.request_id,
+        )
 
     def init_ui(self):
         """Initialise the UI"""
@@ -136,6 +190,60 @@ class WeatherApp(QWidget):
         """)
 
         self.get_weather_button.clicked.connect(self.get_weather)
+        self.region_input.returnPressed.connect(self.get_weather)
+
+    def fetch_point_metadata(self) -> None:
+        request = QNetworkRequest(QUrl(POINTS_URL))
+        reply = self.network_manager.get(request)
+
+        reply.finished.connect(
+            lambda: self.handle_startup_point_metadata(reply),
+        )
+
+    def handle_startup_point_metadata(
+        self,
+        reply: QNetworkReply,
+    ) -> None:
+        try:
+            if reply.error() != QNetworkReply.NetworkError.NoError:
+                print("Could not load location metadata: ", reply.errorString())
+                return
+            data = bytes(reply.readAll())
+
+            reader = csv.DictReader(
+                StringIO(data.decode("latin-1")),
+                delimiter=";",
+            )
+
+            self.point_metadata = list(reader)
+
+            place_names = sorted(
+                {row["point_name"] for row in self.point_metadata if row["point_name"]}
+            )
+
+            self.completer_model = QStandardItemModel(self)
+
+            for place_name in place_names:
+                item = QStandardItem(place_name)
+
+                aliases = place_name_aliases(place_name)
+
+                item.setData(
+                    " ".join(sorted(aliases)),
+                    Qt.ItemDataRole.UserRole,
+                )
+
+                self.completer_model.appendRow(item)
+
+            self.completer = NoramlizedCompleter(self.completer_model, self)
+            self.completer.setCompletionRole(Qt.ItemDataRole.UserRole)
+            self.completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+            self.completer.setFilterMode(Qt.MatchFlag.MatchContains)
+
+            self.region_input.setCompleter(self.completer)
+
+        finally:
+            reply.deleteLater()
 
     def is_active_request(self, request_id: int) -> bool:
         return (
@@ -150,6 +258,14 @@ class WeatherApp(QWidget):
         if not region:
             self.display_error("Please input a region")
             return
+
+        if self.point_metadata is None:
+            self.display_error("Location data is still loading.")
+            return
+
+        self.temperature_label.setText("--°C")
+        self.temp_emoji_label.setText("")
+        self.temp_description_label.setText("")
 
         self.get_weather_button.setEnabled(False)
         self.get_weather_button.setText("Loading...")
@@ -166,34 +282,31 @@ class WeatherApp(QWidget):
                 data,
                 request_id,
             ),
+            request_id,
         )
 
-        self.fetch_url(
-            POINTS_URL,
-            lambda data: self.handle_point_metadata(
-                data,
-                request_id,
-            ),
-        )
+        self.find_region(request_id)
 
     def fetch_url(
         self,
         url: str,
         callback: Callable[[bytes], None],
+        request_id: int,
     ) -> None:
         request = QNetworkRequest(QUrl(url))
         reply = self.network_manager.get(request)
 
-        reply.finished.connect(lambda: self.handle_reply(reply, callback))
+        reply.finished.connect(lambda: self.handle_reply(reply, callback, request_id))
 
     def handle_reply(
         self,
         reply: QNetworkReply,
         callback: Callable[[bytes], None],
+        request_id: int,
     ) -> None:
         try:
             if reply.error() != QNetworkReply.NetworkError.NoError:
-                self.display_error(reply.errorString())
+                self.display_error(reply.errorString(), request_id)
                 return
 
             data = bytes(reply.readAll())
@@ -224,11 +337,11 @@ class WeatherApp(QWidget):
         )
 
         if temperature_url is None:
-            self.display_error("No temperature data available.")
+            self.display_error("No temperature data available.", request_id)
             return
 
         if weather_type_url is None:
-            self.display_error("No weather type data available.")
+            self.display_error("No weather type data available.", request_id)
             return
 
         self.fetch_url(
@@ -237,6 +350,7 @@ class WeatherApp(QWidget):
                 data,
                 request_id,
             ),
+            request_id,
         )
 
         self.fetch_url(
@@ -245,6 +359,7 @@ class WeatherApp(QWidget):
                 data,
                 request_id,
             ),
+            request_id,
         )
 
     @staticmethod
@@ -293,30 +408,33 @@ class WeatherApp(QWidget):
 
         return url
 
-    def handle_point_metadata(
+    def find_region(
         self,
-        data: bytes,
         request_id: int,
     ) -> None:
         if not self.is_active_request(request_id):
             return
 
-        region = self.search_state.region
+        if self.search_state is None:
+            return
 
-        text = data.decode("latin-1")
+        if self.point_metadata is None:
+            return
 
-        reader = csv.DictReader(StringIO(text), delimiter=";")
+        target_aliases = place_name_aliases(self.search_state.region)
 
-        target = region.casefold()
-
-        for row in reader:
-            if row["point_name"].casefold() == target:
+        for row in self.point_metadata:
+            point_name = row["point_name"]
+            if target_aliases & place_name_aliases(point_name):
                 self.search_state.point_id = row["point_id"]
                 self.search_state.point_type_id = row["point_type_id"]
                 self.try_update_weather()
                 return
 
-        self.display_error(f"Region not found: {region}")
+        self.display_error(
+            f"Region not found: {self.search_state.region}",
+            request_id,
+        )
 
     def handle_temperature_data(
         self,
@@ -410,10 +528,11 @@ class WeatherApp(QWidget):
                 self.search_state.temperature = row["tre200h0"]
                 return
 
-    def display_error(
-        self,
-        message,
-    ) -> None:
+    def display_error(self, message: str, request_id: int | None = None) -> None:
+        if request_id is not None:
+            if not self.is_active_request(request_id):
+                return
+
         self.temperature_label.setText("--°C")
         self.temp_emoji_label.setText("")
         self.temp_description_label.setText(message)
