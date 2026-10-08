@@ -104,6 +104,22 @@ class WeatherSearchState:
     wind_speed: float | None = None
 
 
+class WeatherController:
+    """Controller for handling API requests to meteoSwiss."""
+
+    def __init__(
+        self,
+        network_manager: QNetworkAccessManager,
+    ) -> None:
+        self.network_manager = network_manager
+
+        self.request_id: int = 0
+        self.search_state: WeatherSearchState | None = None
+
+        self.weather_descriptions: dict[int, str] = {}
+        self.point_metadata: list[dict[str, str]] | None = None
+
+
 class WeatherApp(QWidget):
     """_summary_
 
