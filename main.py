@@ -90,15 +90,18 @@ class WeatherSearchState:
     region: str
     point_id: str | None = None
     point_type_id: str | None = None
+
     temperature_data: str | None = None
     weather_type_data: str | None = None
     precipitation_probability_data: str | None = None
+    wind_speed_data: str | None = None
 
     temperature: float | None = None
     weather_code: int | None = None
     weather_description: str | None = None
     weather_emoji: str | None = None
     precipitation_probablity: int | None = None
+    wind_speed: float | None = None
 
 
 class WeatherApp(QWidget):
@@ -123,6 +126,7 @@ class WeatherApp(QWidget):
         self.temp_emoji_label = QLabel("")
         self.temp_description_label = QLabel("")
         self.precipitation_label = QLabel("")
+        self.wind_speed_label = QLabel("")
         # Network manager to handle network requests asynchronously
         self.network_manager = QNetworkAccessManager(self)
 
@@ -146,6 +150,7 @@ class WeatherApp(QWidget):
         vbox.addWidget(self.temp_emoji_label)
         vbox.addWidget(self.temp_description_label)
         vbox.addWidget(self.precipitation_label)
+        vbox.addWidget(self.wind_speed_label)
 
         self.setLayout(vbox)
 
@@ -155,6 +160,7 @@ class WeatherApp(QWidget):
         self.temp_emoji_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.temp_description_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.precipitation_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.wind_speed_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self.region_label.setObjectName("region_label")
         self.region_input.setObjectName("region_input")
@@ -163,6 +169,7 @@ class WeatherApp(QWidget):
         self.temp_emoji_label.setObjectName("temp_emoji_label")
         self.temp_description_label.setObjectName("temp_description_label")
         self.precipitation_label.setObjectName("precipitation_label")
+        self.wind_speed_label.setObjectName("wind_speed_label")
 
         self.setStyleSheet("""
                 QLabel, QPushButton {
@@ -192,7 +199,10 @@ class WeatherApp(QWidget):
                     font-size: 50px;
                 }
                 QLabel#precipitation_label{
-                    font-size: 40px;           
+                    font-size: 40px;
+                }
+                QLabel#wind_speed_label {
+                font-size: 40px;
                 }
         """)
 
@@ -245,6 +255,7 @@ class WeatherApp(QWidget):
         self.temp_emoji_label.setText("")
         self.temp_description_label.setText("")
         self.precipitation_label.setText("")
+        self.wind_speed_label.setText("")
 
         self.get_weather_button.setEnabled(False)
         self.get_weather_button.setText("Loading...")
@@ -343,10 +354,16 @@ class WeatherApp(QWidget):
             "rp0003i0",
         )
 
+        wind_speed_url = self.find_latest_asset_url(
+            features,
+            "fu3010h0",
+        )
+
         if precipitation_probability_url is None:
             self.display_error(
                 "No precipitation probability data available.", request_id
             )
+            return
 
         if temperature_url is None:
             self.display_error("No temperature data available.", request_id)
@@ -354,6 +371,10 @@ class WeatherApp(QWidget):
 
         if weather_type_url is None:
             self.display_error("No weather type data available.", request_id)
+            return
+
+        if wind_speed_url is None:
+            self.display_error("No wind speed data available.", request_id)
             return
 
         self.fetch_url(
@@ -377,6 +398,15 @@ class WeatherApp(QWidget):
         self.fetch_url(
             precipitation_probability_url,
             lambda data: self.handle_precipitation_probability_data(
+                data,
+                request_id,
+            ),
+            request_id,
+        )
+
+        self.fetch_url(
+            wind_speed_url,
+            lambda data: self.handle_wind_speed_data(
                 data,
                 request_id,
             ),
@@ -464,6 +494,8 @@ class WeatherApp(QWidget):
     ) -> None:
         if not self.is_active_request(request_id):
             return
+        if self.search_state is None:
+            return
         self.search_state.temperature_data = data.decode("latin-1")
         self.try_update_weather()
 
@@ -473,6 +505,8 @@ class WeatherApp(QWidget):
         request_id: int,
     ) -> None:
         if not self.is_active_request(request_id):
+            return
+        if self.search_state is None:
             return
         self.search_state.weather_type_data = data.decode("latin-1")
         self.try_update_weather()
@@ -502,14 +536,28 @@ class WeatherApp(QWidget):
     ) -> None:
         if not self.is_active_request(request_id):
             return
-
+        if self.search_state is None:
+            return
         self.search_state.precipitation_probability_data = data.decode("latin-1")
+        self.try_update_weather()
+
+    def handle_wind_speed_data(
+        self,
+        data: bytes,
+        request_id: int,
+    ) -> None:
+        if not self.is_active_request(request_id):
+            return
+        if self.search_state is None:
+            return
+        self.search_state.wind_speed_data = data.decode("latin-1")
         self.try_update_weather()
 
     def try_update_weather(self) -> None:
         self.try_update_temperature()
         self.try_update_weather_type()
         self.try_update_precipiation_probability()
+        self.try_update_wind_speed()
         self.display_weather()
 
     def try_update_weather_type(self) -> None:
@@ -590,6 +638,31 @@ class WeatherApp(QWidget):
                 self.search_state.precipitation_probablity = int(row["rp0003i0"])
                 return
 
+    def try_update_wind_speed(self) -> None:
+        if self.search_state is None:
+            return
+        if self.search_state.point_id is None:
+            return
+        if self.search_state.point_type_id is None:
+            return
+        if self.search_state.precipitation_probability_data is None:
+            return
+
+        current_hour = datetime.now(UTC).strftime("%Y%m%d%H00")
+
+        reader = csv.DictReader(
+            StringIO(self.search_state.wind_speed_data), delimiter=";"
+        )
+
+        for row in reader:
+            if (
+                row["point_id"] == self.search_state.point_id
+                and row["point_type_id"] == self.search_state.point_type_id
+                and row["Date"] == current_hour
+            ):
+                self.search_state.wind_speed = float(row["fu3010h0"])
+                return
+
     def display_error(self, message: str, request_id: int | None = None) -> None:
         if request_id is not None:
             if not self.is_active_request(request_id):
@@ -599,6 +672,7 @@ class WeatherApp(QWidget):
         self.temp_emoji_label.setText("")
         self.temp_description_label.setText(message)
         self.precipitation_label.setText("")
+        self.wind_speed_label.setText("")
 
         self.reset_button_state()
 
@@ -618,6 +692,9 @@ class WeatherApp(QWidget):
         if self.search_state.precipitation_probablity is None:
             return
 
+        if self.search_state.wind_speed is None:
+            return
+
         self.temperature_label.setText(f"{self.search_state.temperature:.1f}°C")
 
         self.temp_description_label.setText(self.search_state.weather_description)
@@ -627,6 +704,8 @@ class WeatherApp(QWidget):
         self.precipitation_label.setText(
             f"Precipitation chance: {self.search_state.precipitation_probablity}%"
         )
+
+        self.wind_speed_label.setText(f"Wind: {self.search_state.wind_speed:.1f} km/h")
 
         self.reset_button_state()
 
