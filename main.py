@@ -129,11 +129,15 @@ class WeatherApp(QWidget):
 
     def __init__(self):
         super().__init__()
-        # Empty data points, will be replaced by manager
-        self.request_id: int = 0
-        self.search_state: WeatherSearchState | None = None
-        self.weather_descriptions: dict[int, str] = {}
-        self.point_metadata: list[dict[str, str]] | None = None
+
+        # Network manager to handle network requests asynchronously
+        self.network_manager = QNetworkAccessManager(self)
+
+        # Weather controller
+        self.controller = WeatherController(
+            network_manager=self.network_manager,
+        )
+
         # Widgets
         self.region_label = QLabel("Enter region name: ")
         self.region_input = QLineEdit()
@@ -143,8 +147,6 @@ class WeatherApp(QWidget):
         self.temp_description_label = QLabel("")
         self.precipitation_label = QLabel("")
         self.wind_speed_label = QLabel("")
-        # Network manager to handle network requests asynchronously
-        self.network_manager = QNetworkAccessManager(self)
 
         self.init_ui()
         self.fetch_url(
@@ -234,10 +236,14 @@ class WeatherApp(QWidget):
             delimiter=";",
         )
 
-        self.point_metadata = list(reader)
+        self.controller.point_metadata = list(reader)
 
         place_names = sorted(
-            {row["point_name"] for row in self.point_metadata if row["point_name"]}
+            {
+                row["point_name"]
+                for row in self.controller.point_metadata
+                if row["point_name"]
+            }
         )
 
         self.completer_model = QStandardItemModel(self)
@@ -263,7 +269,8 @@ class WeatherApp(QWidget):
 
     def is_active_request(self, request_id: int) -> bool:
         return (
-            self.search_state is not None and request_id == self.search_state.request_id
+            self.controller.search_state is not None
+            and request_id == self.controller.search_state.request_id
         )
 
     def set_loading_state(self) -> None:
@@ -287,23 +294,23 @@ class WeatherApp(QWidget):
             self.display_error("Please input a region")
             return
 
-        if self.point_metadata is None:
+        if self.controller.point_metadata is None:
             self.display_error("Location data is still loading.")
             return
 
-        if not self.weather_descriptions:
+        if not self.controller.weather_descriptions:
             self.display_error("Weather description data is still loading")
             return
 
-        self.request_id += 1
+        self.controller.request_id += 1
 
         self.set_loading_state()
 
-        self.search_state = WeatherSearchState(
-            request_id=self.request_id,
+        self.controller.search_state = WeatherSearchState(
+            request_id=self.controller.request_id,
             region=region,
         )
-        request_id = self.search_state.request_id
+        request_id = self.controller.search_state.request_id
 
         self.fetch_url(
             ITEMS_URL,
@@ -482,24 +489,24 @@ class WeatherApp(QWidget):
         if not self.is_active_request(request_id):
             return
 
-        if self.search_state is None:
+        if self.controller.search_state is None:
             return
 
-        if self.point_metadata is None:
+        if self.controller.point_metadata is None:
             return
 
-        target_aliases = place_name_aliases(self.search_state.region)
+        target_aliases = place_name_aliases(self.controller.search_state.region)
 
-        for row in self.point_metadata:
+        for row in self.controller.point_metadata:
             point_name = row["point_name"]
             if target_aliases & place_name_aliases(point_name):
-                self.search_state.point_id = row["point_id"]
-                self.search_state.point_type_id = row["point_type_id"]
+                self.controller.search_state.point_id = row["point_id"]
+                self.controller.search_state.point_type_id = row["point_type_id"]
                 self.try_update_weather()
                 return
 
         self.display_error(
-            f"Region not found: {self.search_state.region}",
+            f"Region not found: {self.controller.search_state.region}",
             request_id,
         )
 
@@ -510,9 +517,9 @@ class WeatherApp(QWidget):
     ) -> None:
         if not self.is_active_request(request_id):
             return
-        if self.search_state is None:
+        if self.controller.search_state is None:
             return
-        self.search_state.temperature_data = data.decode("latin-1")
+        self.controller.search_state.temperature_data = data.decode("latin-1")
         self.try_update_weather()
 
     def handle_weather_type_data(
@@ -522,9 +529,9 @@ class WeatherApp(QWidget):
     ) -> None:
         if not self.is_active_request(request_id):
             return
-        if self.search_state is None:
+        if self.controller.search_state is None:
             return
-        self.search_state.weather_type_data = data.decode("latin-1")
+        self.controller.search_state.weather_type_data = data.decode("latin-1")
         self.try_update_weather()
 
     def handle_pictogram_data(self, data: bytes) -> None:
@@ -541,7 +548,7 @@ class WeatherApp(QWidget):
             description_en = row[5]
 
             if isinstance(code, int) and description_en:
-                self.weather_descriptions[code] = str(description_en)
+                self.controller.weather_descriptions[code] = str(description_en)
 
         workbook.close()
 
@@ -552,9 +559,11 @@ class WeatherApp(QWidget):
     ) -> None:
         if not self.is_active_request(request_id):
             return
-        if self.search_state is None:
+        if self.controller.search_state is None:
             return
-        self.search_state.precipitation_probability_data = data.decode("latin-1")
+        self.controller.search_state.precipitation_probability_data = data.decode(
+            "latin-1"
+        )
         self.try_update_weather()
 
     def handle_wind_speed_data(
@@ -564,9 +573,9 @@ class WeatherApp(QWidget):
     ) -> None:
         if not self.is_active_request(request_id):
             return
-        if self.search_state is None:
+        if self.controller.search_state is None:
             return
-        self.search_state.wind_speed_data = data.decode("latin-1")
+        self.controller.search_state.wind_speed_data = data.decode("latin-1")
         self.try_update_weather()
 
     def try_update_weather(self) -> None:
@@ -577,106 +586,111 @@ class WeatherApp(QWidget):
         self.display_weather()
 
     def try_update_weather_type(self) -> None:
-        if self.search_state is None:
+        if self.controller.search_state is None:
             return
-        if self.search_state.point_id is None:
+        if self.controller.search_state.point_id is None:
             return
-        if self.search_state.weather_type_data is None:
+        if self.controller.search_state.weather_type_data is None:
             return
 
         current_hour = datetime.now(UTC).strftime("%Y%m%d%H00")
 
         reader = csv.DictReader(
-            StringIO(self.search_state.weather_type_data),
+            StringIO(self.controller.search_state.weather_type_data),
             delimiter=";",
         )
 
         for row in reader:
             if (
-                row["point_id"] == self.search_state.point_id
-                and row["point_type_id"] == self.search_state.point_type_id
+                row["point_id"] == self.controller.search_state.point_id
+                and row["point_type_id"] == self.controller.search_state.point_type_id
                 and row["Date"] == current_hour
             ):
                 weather_code = int(row["jww003i0"])
-                self.search_state.weather_code = weather_code
-                self.search_state.weather_description = self.weather_descriptions.get(
-                    weather_code,
-                    f"Unknown weather code ({weather_code})",
+                self.controller.search_state.weather_code = weather_code
+                self.controller.search_state.weather_description = (
+                    self.controller.weather_descriptions.get(
+                        weather_code,
+                        f"Unknown weather code ({weather_code})",
+                    )
                 )
-                self.search_state.weather_emoji = self.get_weather_emoji(
-                    self.search_state.weather_description
+                self.controller.search_state.weather_emoji = self.get_weather_emoji(
+                    self.controller.search_state.weather_description
                 )
                 return
 
     def try_update_temperature(self) -> None:
-        if self.search_state is None:
+        if self.controller.search_state is None:
             return
-        if self.search_state.point_id is None:
+        if self.controller.search_state.point_id is None:
             return
-        if self.search_state.temperature_data is None:
+        if self.controller.search_state.temperature_data is None:
             return
 
         reader = csv.DictReader(
-            StringIO(self.search_state.temperature_data),
+            StringIO(self.controller.search_state.temperature_data),
             delimiter=";",
         )
 
         for row in reader:
             if (
-                row["point_id"] == self.search_state.point_id
-                and row["point_type_id"] == self.search_state.point_type_id
+                row["point_id"] == self.controller.search_state.point_id
+                and row["point_type_id"] == self.controller.search_state.point_type_id
             ):
-                self.search_state.temperature = float(row["tre200h0"])
+                self.controller.search_state.temperature = float(row["tre200h0"])
                 return
 
     def try_update_precipiation_probability(self) -> None:
-        if self.search_state is None:
+        if self.controller.search_state is None:
             return
-        if self.search_state.point_id is None:
+        if self.controller.search_state.point_id is None:
             return
-        if self.search_state.point_type_id is None:
+        if self.controller.search_state.point_type_id is None:
             return
-        if self.search_state.precipitation_probability_data is None:
+        if self.controller.search_state.precipitation_probability_data is None:
             return
 
         current_hour = datetime.now(UTC).strftime("%Y%m%d%H00")
 
         reader = csv.DictReader(
-            StringIO(self.search_state.precipitation_probability_data), delimiter=";"
+            StringIO(self.controller.search_state.precipitation_probability_data),
+            delimiter=";",
         )
 
         for row in reader:
             if (
-                row["point_id"] == self.search_state.point_id
-                and row["point_type_id"] == self.search_state.point_type_id
+                row["point_id"] == self.controller.search_state.point_id
+                and row["point_type_id"] == self.controller.search_state.point_type_id
                 and row["Date"] == current_hour
             ):
-                self.search_state.precipitation_probablity = int(row["rp0003i0"])
+                self.controller.search_state.precipitation_probablity = int(
+                    row["rp0003i0"]
+                )
                 return
 
     def try_update_wind_speed(self) -> None:
-        if self.search_state is None:
+        if self.controller.search_state is None:
             return
-        if self.search_state.point_id is None:
+        if self.controller.search_state.point_id is None:
             return
-        if self.search_state.point_type_id is None:
+        if self.controller.search_state.point_type_id is None:
             return
-        if self.search_state.precipitation_probability_data is None:
+        if self.controller.search_state.precipitation_probability_data is None:
             return
 
         current_hour = datetime.now(UTC).strftime("%Y%m%d%H00")
 
         reader = csv.DictReader(
-            StringIO(self.search_state.wind_speed_data), delimiter=";"
+            StringIO(self.controller.search_state.wind_speed_data), delimiter=";"
         )
 
         for row in reader:
             if (
-                row["point_id"] == self.search_state.point_id
-                and row["point_type_id"] == self.search_state.point_type_id
+                row["point_id"] == self.controller.search_state.point_id
+                and row["point_type_id"] == self.controller.search_state.point_type_id
                 and row["Date"] == current_hour
             ):
-                self.search_state.wind_speed = float(row["fu3010h0"])
+                self.controller.search_state.wind_speed = float(row["fu3010h0"])
                 return
 
     def display_error(self, message: str, request_id: int | None = None) -> None:
@@ -693,35 +707,41 @@ class WeatherApp(QWidget):
         self.reset_button_state()
 
     def display_weather(self):
-        if self.search_state is None:
+        if self.controller.search_state is None:
             return
 
-        if self.search_state.temperature is None:
+        if self.controller.search_state.temperature is None:
             return
 
-        if self.search_state.weather_description is None:
+        if self.controller.search_state.weather_description is None:
             return
 
-        if self.search_state.weather_emoji is None:
+        if self.controller.search_state.weather_emoji is None:
             return
 
-        if self.search_state.precipitation_probablity is None:
+        if self.controller.search_state.precipitation_probablity is None:
             return
 
-        if self.search_state.wind_speed is None:
+        if self.controller.search_state.wind_speed is None:
             return
 
-        self.temperature_label.setText(f"{self.search_state.temperature:.1f}°C")
-
-        self.temp_description_label.setText(self.search_state.weather_description)
-
-        self.temp_emoji_label.setText(self.search_state.weather_emoji)
-
-        self.precipitation_label.setText(
-            f"Precipitation chance: {self.search_state.precipitation_probablity}%"
+        self.temperature_label.setText(
+            f"{self.controller.search_state.temperature:.1f}°C"
         )
 
-        self.wind_speed_label.setText(f"Wind: {self.search_state.wind_speed:.1f} km/h")
+        self.temp_description_label.setText(
+            self.controller.search_state.weather_description
+        )
+
+        self.temp_emoji_label.setText(self.controller.search_state.weather_emoji)
+
+        self.precipitation_label.setText(
+            f"Precipitation chance: {self.controller.search_state.precipitation_probablity}%"
+        )
+
+        self.wind_speed_label.setText(
+            f"Wind: {self.controller.search_state.wind_speed:.1f} km/h"
+        )
 
         self.reset_button_state()
 
