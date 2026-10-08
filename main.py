@@ -671,17 +671,21 @@ class WeatherApp(QWidget):
     def try_update_wind_speed(self) -> None:
         if self.controller.search_state is None:
             return
+
         if self.controller.search_state.point_id is None:
             return
+
         if self.controller.search_state.point_type_id is None:
             return
-        if self.controller.search_state.precipitation_probability_data is None:
+
+        if self.controller.search_state.wind_speed_data is None:
             return
 
         current_hour = datetime.now(UTC).strftime("%Y%m%d%H00")
 
         reader = csv.DictReader(
-            StringIO(self.controller.search_state.wind_speed_data), delimiter=";"
+            StringIO(self.controller.search_state.wind_speed_data),
+            delimiter=";",
         )
 
         for row in reader:
